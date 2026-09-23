@@ -308,7 +308,11 @@ test('run lifecycle scripts of dependent packages after running scripts of their
 test('run prepare script for git-hosted dependencies', async () => {
   const project = prepareEmpty()
 
-  await addDependenciesToPackage({}, ['pnpm/test-git-fetch#8b333f12d5357f4f25a654c305c826294cb073bf'], testDefaults({ fastUnpack: false }))
+  await addDependenciesToPackage({}, ['pnpm/test-git-fetch#8b333f12d5357f4f25a654c305c826294cb073bf'], testDefaults({
+    fastUnpack: false,
+    onlyBuiltDependencies: ['test-git-fetch'],
+    neverBuiltDependencies: undefined,
+  }))
 
   const scripts = project.requireModule('test-git-fetch/output.json')
   expect(scripts).toStrictEqual([
@@ -320,6 +324,56 @@ test('run prepare script for git-hosted dependencies', async () => {
     'install',
     'postinstall',
   ])
+})
+
+test('do not run prepare script for git-hosted dependencies that are not allowed to be built', async () => {
+  const project = prepareEmpty()
+
+  await expect(
+    addDependenciesToPackage({}, ['pnpm/test-git-fetch#8b333f12d5357f4f25a654c305c826294cb073bf'], testDefaults({ fastUnpack: false }))
+  ).rejects.toThrow(/The git-hosted package "test-git-fetch@[^"]+" needs to execute build scripts but is not in the "onlyBuiltDependencies" allowlist/)
+  project.hasNot('test-git-fetch')
+
+  await expect(
+    addDependenciesToPackage({}, ['pnpm/test-git-fetch#8b333f12d5357f4f25a654c305c826294cb073bf'], testDefaults({
+      fastUnpack: false,
+      onlyBuiltDependencies: ['@pnpm.e2e/pre-and-postinstall-scripts-example'],
+      neverBuiltDependencies: undefined,
+    }))
+  ).rejects.toThrow(/The git-hosted package "test-git-fetch@[^"]+" needs to execute build scripts but is not in the "onlyBuiltDependencies" allowlist/)
+  project.hasNot('test-git-fetch')
+})
+
+test('do not run prepare script for git-hosted dependencies that are not allowed to be built, when installing from a lockfile', async () => {
+  const project = prepareEmpty()
+
+  const { updatedManifest: manifest } = await addDependenciesToPackage({}, ['pnpm/test-git-fetch#8b333f12d5357f4f25a654c305c826294cb073bf'], testDefaults({
+    fastUnpack: false,
+    onlyBuiltDependencies: ['test-git-fetch'],
+    neverBuiltDependencies: undefined,
+  }))
+  project.has('test-git-fetch')
+
+  rimraf('node_modules')
+  // A new store is used, so the git-hosted dependency has to be fetched (and prepared) again
+  await expect(
+    install(manifest, testDefaults({ fastUnpack: false, frozenLockfile: true, storeDir: path.resolve('.store-isolated') }))
+  ).rejects.toThrow(/The git-hosted package "test-git-fetch@[^"]+" needs to execute build scripts but is not in the "onlyBuiltDependencies" allowlist/)
+
+  rimraf('node_modules')
+  await expect(
+    install(manifest, testDefaults({ fastUnpack: false, frozenLockfile: true, nodeLinker: 'hoisted', storeDir: path.resolve('.store-hoisted') }))
+  ).rejects.toThrow(/The git-hosted package "test-git-fetch@[^"]+" needs to execute build scripts but is not in the "onlyBuiltDependencies" allowlist/)
+
+  rimraf('node_modules')
+  await install(manifest, testDefaults({
+    fastUnpack: false,
+    frozenLockfile: true,
+    onlyBuiltDependencies: ['test-git-fetch'],
+    neverBuiltDependencies: undefined,
+    storeDir: path.resolve('.store-allowed'),
+  }))
+  project.has('test-git-fetch')
 })
 
 test('lifecycle scripts run before linking bins', async () => {

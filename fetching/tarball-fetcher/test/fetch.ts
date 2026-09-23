@@ -444,6 +444,7 @@ test('fail when preparing a git-hosted package', async () => {
 
   await expect(
     fetch.gitHostedTarball(cafs, resolution, {
+      allowBuild: (pkgName) => pkgName === '@pnpm.e2e/prepare-script-fails',
       filesIndexFile,
       lockfileDir: process.cwd(),
       pkg,
@@ -516,6 +517,54 @@ test('do not build the package when scripts are ignored', async () => {
   expect(filesIndex).toHaveProperty(['package.json'])
   expect(filesIndex).not.toHaveProperty(['prepare.txt'])
   expect(globalWarn).toHaveBeenCalledWith(`The git-hosted package fetched from "${tarball}" has to be built but the build scripts were ignored.`)
+})
+
+test('block git-hosted package with prepare script that is not allowed to be built', async () => {
+  process.chdir(tempy.directory())
+
+  const tarball = 'https://codeload.github.com/pnpm-e2e/prepare-script-works/tar.gz/55416a9c468806a935636c0ad0371a14a64df8c9'
+  const resolution = { tarball }
+
+  await expect(
+    fetch.gitHostedTarball(cafs, resolution, {
+      allowBuild: () => false,
+      filesIndexFile,
+      lockfileDir: process.cwd(),
+      pkg,
+    })
+  ).rejects.toThrow(`Failed to prepare git-hosted package fetched from "${tarball}": The git-hosted package "@pnpm.e2e/prepare-script-works@1.0.0" needs to execute build scripts but is not in the "onlyBuiltDependencies" allowlist`)
+})
+
+test('block git-hosted package with prepare script when no allowBuild function is passed', async () => {
+  process.chdir(tempy.directory())
+
+  const tarball = 'https://codeload.github.com/pnpm-e2e/prepare-script-works/tar.gz/55416a9c468806a935636c0ad0371a14a64df8c9'
+  const resolution = { tarball }
+
+  await expect(
+    fetch.gitHostedTarball(cafs, resolution, {
+      filesIndexFile,
+      lockfileDir: process.cwd(),
+      pkg,
+    })
+  ).rejects.toMatchObject({
+    code: 'ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED',
+  })
+})
+
+test('allow git-hosted package with prepare script that is allowed to be built', async () => {
+  process.chdir(tempy.directory())
+
+  const resolution = { tarball: 'https://codeload.github.com/pnpm-e2e/prepare-script-works/tar.gz/55416a9c468806a935636c0ad0371a14a64df8c9' }
+
+  const { filesIndex } = await fetch.gitHostedTarball(cafs, resolution, {
+    allowBuild: (pkgName) => pkgName === '@pnpm.e2e/prepare-script-works',
+    filesIndexFile,
+    lockfileDir: process.cwd(),
+    pkg,
+  })
+
+  expect(filesIndex).toHaveProperty(['package.json'])
 })
 
 test('when extracting files with the same name, pick the last ones', async () => {
