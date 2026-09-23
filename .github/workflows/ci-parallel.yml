@@ -1,0 +1,147 @@
+name: CI (parallel)
+
+# Like CI, but instead of running every package's test suite serially on one
+# runner, this fans out: one GitHub runner per workspace package. A `discover`
+# job builds the matrix (all packages that have a `_test` script) and the
+# `test` job runs each package's suite on its own runner, in parallel.
+#
+# Trigger manually from the Actions tab (workflow_dispatch).
+
+on:
+  workflow_dispatch:
+    inputs:
+      node-version:
+        description: "Node.js version to test on"
+        required: false
+        default: "22.12.0"
+      test-filter:
+        description: "Space-separated workspace package names to test, each optionally suffixed with :<jest testPathPattern> (empty = all packages)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      packages: ${{ steps.list.outputs.packages }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Build package matrix (packages with a _test script)
+        id: list
+        env:
+          TEST_FILTER: ${{ github.event.inputs.test-filter || '' }}
+        run: |
+          set -euo pipefail
+          packages=$(git ls-files | grep -E '(^|/)package\.json$' | node -e '
+            const fs = require("fs")
+            let s = ""
+            process.stdin.on("data", d => s += d).on("end", () => {
+              const files = s.split("\n").filter(Boolean)
+              const names = new Set()
+              for (const f of files) {
+                if (f.includes("node_modules")) continue
+                try {
+                  const pj = JSON.parse(fs.readFileSync(f, "utf8"))
+                  if (pj.name && pj.scripts && pj.scripts._test) names.add(pj.name)
+                } catch {}
+              }
+              const filter = (process.env.TEST_FILTER || "").split(/\s+/).filter(Boolean)
+              if (filter.length === 0) {
+                process.stdout.write(JSON.stringify([...names].sort()))
+                return
+              }
+              for (const entry of filter) {
+                const pkg = entry.split(":")[0]
+                if (!names.has(pkg)) {
+                  console.error(`test-filter entry "${entry}" does not match a package with a _test script`)
+                  process.exit(1)
+                }
+              }
+              process.stdout.write(JSON.stringify(filter))
+            })
+          ')
+          count=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).length))" "$packages")
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ -n "$TEST_FILTER" ]; then
+            echo "Filtered to $count package(s): $packages"
+          fi
+          echo "Discovered $count packages with a _test script"
+
+  test:
+    needs: discover
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      # GitHub caps a matrix at 256 jobs; 125 packages x 2 OS = 250 jobs,
+      # under the 256 cap.
+      matrix:
+        package: ${{ fromJson(needs.discover.outputs.packages) }}
+        os: [ubuntu-latest, windows-latest]
+    name: ${{ matrix.os }} / ${{ matrix.package }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Configure Git
+        run: |
+          git config --global core.autocrlf false
+          git config --global user.name "xyz"
+          git config --global user.email "x@y.z"
+      - name: Checkout Commit
+        uses: actions/checkout@v5
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4.2.0
+        with:
+          standalone: true
+      - name: Setup Node
+        # Keep `pnpm env use` (not actions/setup-node): setup-node leaves pnpm's
+        # managed runtime unprovisioned and a dlx test hangs on Windows.
+        # Retried because the Node download is flaky on some runners.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if pnpm env use -g "$NODE_VERSION"; then
+              exit 0
+            fi
+            echo "pnpm env use failed (attempt $attempt/5)"
+            if [ "$attempt" -lt 5 ]; then
+              sleep 30
+            fi
+          done
+          echo "pnpm env use -g $NODE_VERSION failed after 5 attempts"
+          exit 1
+        env:
+          NODE_VERSION: ${{ github.event.inputs.node-version || '22.12.0' }}
+        timeout-minutes: 25
+      - name: Install npm@8
+        run: pnpm add --global npm@8
+        timeout-minutes: 10
+      - name: pnpm install
+        run: pnpm install
+        timeout-minutes: 20
+      - name: Compile + prepare fixtures
+        # Mirrors `pretest`: builds every package's lib/ (the package under test
+        # imports its workspace deps' compiled output) and prepares fixtures.
+        run: pnpm run pretest
+        timeout-minutes: 30
+      - name: Run ${{ matrix.package }} test suite
+        run: |
+          entry="$MATRIX_PACKAGE"
+          pkg="${entry%%:*}"
+          if [ "$entry" != "$pkg" ]; then
+            pattern="${entry#*:}"
+            pnpm --filter="$pkg" run _test "$pattern"
+          else
+            pnpm --filter="$pkg" run _test
+          fi
+        timeout-minutes: 30
+        env:
+          PNPM_WORKERS: 3
+          MATRIX_PACKAGE: ${{ matrix.package }}
