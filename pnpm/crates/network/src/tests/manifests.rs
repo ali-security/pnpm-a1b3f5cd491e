@@ -1,6 +1,8 @@
-use super::TEST_CA_PEM;
 #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
-use super::{EnvGuard, NetworkSettings, PerRegistryTls, ProxyConfig, ThrottledClient, TlsConfig};
+use super::EnvGuard;
+use super::{
+    NetworkSettings, PerRegistryTls, ProxyConfig, TEST_CA_PEM, ThrottledClient, TlsConfig,
+};
 
 // `SSL_CERT_FILE` alone switches `rustls-native-certs` to env-only
 // loading, so pointing it at an empty file is a portable stand-in for a
@@ -69,4 +71,52 @@ fn a_corrupt_block_does_not_discard_the_rest_of_a_ca_bundle() {
     assert_eq!(crate::certificates::parse_ca_bundle(bundle.as_bytes()).len(), 2);
     assert_eq!(crate::certificates::parse_ca_bundle(CORRUPT.as_bytes()).len(), 0);
     assert_eq!(crate::certificates::parse_ca_bundle(TEST_CA_PEM.as_bytes()).len(), 1);
+}
+
+#[cfg(target_vendor = "apple")]
+#[test]
+fn platform_verifier_detects_unreachable_trustd_under_sandbox() {
+    if std::env::var("PNPM_TEST_DENIED_TRUSTD").is_ok() {
+        assert!(!crate::certificates::is_platform_verifier_available());
+        let client = ThrottledClient::for_installs(
+            &ProxyConfig::default(),
+            &TlsConfig::default(),
+            &PerRegistryTls::default(),
+            &NetworkSettings::default(),
+        );
+        assert!(client.is_ok(), "client should build with bundled roots fallback under sandbox");
+
+        let client_with_ca = ThrottledClient::for_installs(
+            &ProxyConfig::default(),
+            &TlsConfig { ca: vec![TEST_CA_PEM.to_string()], ..TlsConfig::default() },
+            &PerRegistryTls::default(),
+            &NetworkSettings::default(),
+        );
+        assert!(client_with_ca.is_ok(), "client with custom ca should build under sandbox");
+        return;
+    }
+
+    assert!(crate::certificates::is_platform_verifier_available());
+
+    let Ok(exe) = std::env::current_exe() else { return };
+    let output = std::process::Command::new("sandbox-exec")
+        .args([
+            "-p",
+            r#"(version 1)(allow default)(deny mach-lookup (global-name "com.apple.trustd.agent"))"#,
+        ])
+        .arg(&exe)
+        .arg("--exact")
+        .arg("tests::manifests::platform_verifier_detects_unreachable_trustd_under_sandbox")
+        .arg("--nocapture")
+        .env("PNPM_TEST_DENIED_TRUSTD", "1")
+        .output();
+
+    if let Ok(output) = output {
+        assert!(
+            output.status.success(),
+            "sandbox test failed: stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }
